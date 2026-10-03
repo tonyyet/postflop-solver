@@ -290,6 +290,35 @@ pub fn compute_exploitability<T: Game>(game: &T) -> f32 {
     }
 }
 
+/// Computes the exploitability of the current strategy, treating *every* node as free.
+///
+/// `compute_exploitability()` measures how much the best response can gain *within the
+/// restrictions imposed by node locking*: nodes with a locking strategy are held fixed,
+/// so the value converges to zero even though the profile is not the game's equilibrium.
+/// This variant ignores the locking strategy for the best response (the locked player's
+/// frequencies are still used as the opponent's strategy).
+///
+/// This is the actual exploitability of the delivered (locked) profile. The two metrics differ
+/// substantially even for a *faithful* lock, i.e., when a node is pinned to the frequency it has
+/// in the unlocked solve: locking changes which equilibrium the solver converges to, and the
+/// resulting profile can be exploitable by a large amount while `compute_exploitability()` still
+/// reports ~0. Use this variant to judge the quality of a locked profile; use
+/// `compute_exploitability()` only to check convergence *within* the locks.
+#[inline]
+pub fn compute_exploitability_unrestricted<T: Game>(game: &T) -> f32 {
+    if !game.is_ready() && !game.is_solved() {
+        panic!("Game is not ready");
+    }
+
+    let mes_ev = compute_mes_ev_unrestricted(game);
+    if !game.is_raked() {
+        (mes_ev[0] + mes_ev[1]) * 0.5
+    } else {
+        let current_ev = compute_current_ev(game);
+        ((mes_ev[0] - current_ev[0]) + (mes_ev[1] - current_ev[1])) * 0.5
+    }
+}
+
 /// Computes the expected values of the current strategy of each player.
 ///
 /// The bias, i.e., (starting pot) / 2, is already subtracted to increase the significant figures.
@@ -329,6 +358,23 @@ pub fn compute_current_ev<T: Game>(game: &T) -> [f32; 2] {
 /// Therefore, the average of the return value corresponds to the exploitability value if not raked.
 #[inline]
 pub fn compute_mes_ev<T: Game>(game: &T) -> [f32; 2] {
+    compute_mes_ev_inner(game, false)
+}
+
+/// Computes the expected values of the MES of each player, where the best response is
+/// allowed to deviate at node-locked nodes as well.
+///
+/// See [`compute_exploitability_unrestricted()`]. The locked player's strategy is still
+/// used when computing the counterfactual values, so the returned values describe what a
+/// free best response achieves against the locked profile.
+#[inline]
+pub fn compute_mes_ev_unrestricted<T: Game>(game: &T) -> [f32; 2] {
+    compute_mes_ev_inner(game, true)
+}
+
+/// The common implementation of [`compute_mes_ev()`] and [`compute_mes_ev_unrestricted()`].
+#[inline]
+fn compute_mes_ev_inner<T: Game>(game: &T, ignore_locking: bool) -> [f32; 2] {
     if !game.is_ready() && !game.is_solved() {
         panic!("Game is not ready");
     }
@@ -347,6 +393,7 @@ pub fn compute_mes_ev<T: Game>(game: &T) -> [f32; 2] {
             &game.root(),
             player,
             reach[player ^ 1],
+            ignore_locking,
         );
         unsafe { cfvalues[player].set_len(game.num_private_hands(player)) };
     }
@@ -479,7 +526,8 @@ fn compute_cfvalue_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut strategy, locking);
+        let weight = game.locking_weight(node);
+        apply_stored_locking_strategy(&mut strategy, locking, weight);
 
         // sum up the counterfactual values
         let mut cfv_actions = cfv_actions.lock();
@@ -524,7 +572,8 @@ fn compute_cfvalue_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut cfreach_actions, locking);
+        let weight = game.locking_weight(node);
+        apply_stored_locking_strategy(&mut cfreach_actions, locking, weight);
 
         // update the reach probabilities
         let row_size = cfreach.len();
@@ -569,6 +618,7 @@ fn compute_best_cfv_recursive<T: Game>(
     node: &T::Node,
     player: usize,
     cfreach: &[f32],
+    ignore_locking: bool,
 ) {
     // terminal node
     if node.is_terminal() {
@@ -582,7 +632,7 @@ fn compute_best_cfv_recursive<T: Game>(
     // simply recurse when the number of actions is one
     if num_actions == 1 && !node.is_chance() {
         let child = &node.play(0);
-        compute_best_cfv_recursive(result, game, child, player, cfreach);
+        compute_best_cfv_recursive(result, game, child, player, cfreach, ignore_locking);
         return;
     }
 
@@ -614,6 +664,7 @@ fn compute_best_cfv_recursive<T: Game>(
                 &node.play(action),
                 player,
                 &cfreach_updated,
+                ignore_locking,
             )
         });
 
@@ -660,19 +711,38 @@ fn compute_best_cfv_recursive<T: Game>(
                 &node.play(action),
                 player,
                 cfreach,
+                ignore_locking,
             )
         });
 
         let locking = game.locking_strategy(node);
+        let weight = game.locking_weight(node);
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
 
-        if locking.is_empty() {
+        if locking.is_empty() || ignore_locking {
             // compute element-wise maximum (take the best response)
             max_slices_uninit(result, &cfv_actions);
-        } else {
-            // when the node is locked
+        } else if weight >= 1.0 {
+            // when the node is hard-locked
             max_fma_slices_uninit(result, &cfv_actions, locking);
+        } else if weight <= 0.0 {
+            max_slices_uninit(result, &cfv_actions);
+        } else {
+            // when the node is soft-locked: the locked mixture and the best response are blended
+            // by the weight, so that the residual frequency `1.0 - weight` is chosen optimally
+            let mut hard = vec![MaybeUninit::<f32>::uninit(); num_hands];
+            let mut free = vec![MaybeUninit::<f32>::uninit(); num_hands];
+            let hard = max_fma_slices_uninit(&mut hard, &cfv_actions, locking);
+            let free = max_slices_uninit(&mut free, &cfv_actions);
+            let hard = unsafe { std::slice::from_raw_parts(hard.as_ptr() as *const f32, num_hands) };
+            let free = unsafe { std::slice::from_raw_parts(free.as_ptr() as *const f32, num_hands) };
+            result
+                .iter_mut()
+                .zip(hard.iter().zip(free))
+                .for_each(|(d, (h, f))| {
+                    d.write(weight * *h + (1.0 - weight) * *f);
+                });
         }
     }
     // opponent node
@@ -693,7 +763,8 @@ fn compute_best_cfv_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut cfreach_actions, locking);
+        let weight = game.locking_weight(node);
+        apply_stored_locking_strategy(&mut cfreach_actions, locking, weight);
 
         // update the reach probabilities
         let row_size = cfreach.len();
@@ -709,6 +780,7 @@ fn compute_best_cfv_recursive<T: Game>(
                 &node.play(action),
                 player,
                 row(&cfreach_actions, action, row_size),
+                ignore_locking,
             );
         });
 
@@ -817,13 +889,54 @@ pub(crate) fn normalized_strategy_compressed(strategy: &[u16], num_actions: usiz
     normalized
 }
 
+/// Applies the locking strategy to the given strategy.
+///
+/// `dst` is modified in place: every entry where `locking` is non-negative (that is, every entry
+/// of a locked private hand) becomes `weight * locking + (1.0 - weight) * dst`.
+///
+/// - `weight >= 1.0` is a hard lock (the locking strategy is applied as it is),
+/// - `weight <= 0.0` leaves the strategy untouched,
+/// - anything in between is a soft (restricted response) lock, where the residual frequency
+///   `1.0 - weight` is decided by the solver.
+///
+/// This is used by all the code paths that consume a strategy (the solver itself, the result
+/// interpreter and the EV/exploitability computations), so that the strategy that is solved,
+/// displayed and evaluated is always the same one.
 #[inline]
-pub(crate) fn apply_locking_strategy(dst: &mut [f32], locking: &[f32]) {
-    if !locking.is_empty() {
+pub(crate) fn apply_locking_strategy(dst: &mut [f32], locking: &[f32], weight: f32) {
+    if locking.is_empty() || weight <= 0.0 {
+        return;
+    }
+
+    if weight >= 1.0 {
         dst.iter_mut().zip(locking).for_each(|(d, s)| {
             if s.is_sign_positive() {
                 *d = *s;
             }
         });
+    } else {
+        dst.iter_mut().zip(locking).for_each(|(d, s)| {
+            if s.is_sign_positive() {
+                *d = weight * *s + (1.0 - weight) * *d;
+            }
+        });
+    }
+}
+
+/// Applies the locking strategy to a strategy that has been loaded from the storage.
+///
+/// The solver mixes the target strategy into every strategy it accumulates while solving
+/// (see [`crate::game::interpreter::PostFlopGame::lock_current_strategy_with_weight`]), so a
+/// stored strategy already contains the soft-lock mixture. It may only be overridden for hard
+/// locks (`weight >= 1.0`), where the stored values of the locked entries are pinned and may
+/// hold stale values.
+///
+/// Mixing an already mixed strategy again would apply
+/// `weight * target + (1.0 - weight) * (weight * target + (1.0 - weight) * solved)`, which
+/// pulls every reported frequency towards the target (`weight -> weight * (2.0 - weight)`).
+#[inline]
+pub(crate) fn apply_stored_locking_strategy(dst: &mut [f32], locking: &[f32], weight: f32) {
+    if !locking.is_empty() && weight >= 1.0 {
+        apply_locking_strategy(dst, locking, weight);
     }
 }

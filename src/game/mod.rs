@@ -98,6 +98,10 @@ pub struct PostFlopGame {
     storage_ip: Vec<u8>,
     storage_chance: Vec<u8>,
     locking_strategy: BTreeMap<usize, Vec<f32>>,
+    // Weight of each locking strategy: `1.0` is a hard lock and values in `(0.0, 1.0)` are soft
+    // (restricted response) locks. Not serialized: the weight is a transient solve option and the
+    // caller is responsible for restoring it before solving.
+    locking_weight: BTreeMap<usize, f32>,
 
     // result interpreter
     action_history: Vec<usize>,

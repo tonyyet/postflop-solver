@@ -837,7 +837,10 @@ impl PostFlopGame {
         };
 
         let locking = self.locking_strategy(&node);
-        apply_locking_strategy(&mut ret, locking);
+        let weight = self.locking_weight(&node);
+        // the solver already mixes a soft lock into every stored strategy, so the lock is only
+        // re-applied here for hard locks (see `apply_stored_locking_strategy`)
+        apply_stored_locking_strategy(&mut ret, locking, weight);
 
         ret.chunks_exact_mut(num_hands).for_each(|chunk| {
             self.apply_swap(chunk, player, false);
@@ -868,6 +871,27 @@ impl PostFlopGame {
     /// Panics if the memory is not yet allocated or the game is already solved.
     /// Also, panics if the current node is a terminal node or a chance node.
     pub fn lock_current_strategy(&mut self, strategy: &[f32]) {
+        self.lock_current_strategy_with_weight(strategy, 1.0);
+    }
+
+    /// Locks the strategy of the current node with the given weight (soft lock).
+    ///
+    /// This is the restricted response variant of [`Self::lock_current_strategy`]: the locked
+    /// frequencies are blended with the solved ones, so that the node plays
+    /// `weight * locked + (1.0 - weight) * solved`.
+    ///
+    /// - `weight = 1.0` is identical to [`Self::lock_current_strategy`],
+    /// - `weight = 0.0` leaves the node effectively unlocked,
+    /// - `0.0 < weight < 1.0` keeps the residual frequency `1.0 - weight` free, so the solver
+    ///   optimizes the part of the strategy that is not locked.
+    ///
+    /// The blended strategy is what the node plays, what the reported EV/exploitability is
+    /// computed with, and what [`Self::strategy`] returns. The weight is clamped to `[0.0, 1.0]`.
+    /// Note that the weight is not serialized, so it must be restored after unserializing a game.
+    ///
+    /// The other behaviors are the same as [`Self::lock_current_strategy`].
+    pub fn lock_current_strategy_with_weight(&mut self, strategy: &[f32], weight: f32) {
+        let weight = weight.clamp(0.0, 1.0);
         if self.state < State::MemoryAllocated {
             panic!("Memory is not allocated");
         }
@@ -922,6 +946,7 @@ impl PostFlopGame {
         node.is_locked = true;
         let index = self.node_index(&node);
         self.locking_strategy.insert(index, locking);
+        self.locking_weight.insert(index, weight);
     }
 
     /// Unlocks the strategy of the current node.
@@ -955,6 +980,28 @@ impl PostFlopGame {
         node.is_locked = false;
         let index = self.node_index(&node);
         self.locking_strategy.remove(&index);
+        self.locking_weight.remove(&index);
+    }
+
+    /// Removes all locking strategies from all nodes.
+    ///
+    /// This method must be called after allocating memory and before solving the game.
+    /// Panics if the memory is not yet allocated or the game is already solved.
+    pub fn clear_locking_strategy(&mut self) {
+        if self.state < State::MemoryAllocated {
+            panic!("Memory is not allocated");
+        }
+
+        if self.state == State::Solved {
+            panic!("Game is already solved");
+        }
+
+        self.locking_strategy.clear();
+        self.locking_weight.clear();
+
+        for node in &self.node_arena {
+            node.lock().is_locked = false;
+        }
     }
 
     /// Returns the locking strategy of the current node.
@@ -990,6 +1037,53 @@ impl PostFlopGame {
             });
             ret
         })
+    }
+    /// Returns the weight of the locking strategy of the current node.
+    ///
+    /// Returns `None` if the current node is not locked.
+    /// See [`Self::lock_current_strategy_with_weight`] for the meaning of the weight.
+    #[inline]
+    pub fn current_locking_weight(&self) -> Option<f32> {
+        if self.state < State::MemoryAllocated {
+            panic!("Memory is not allocated");
+        }
+
+        if self.is_terminal_node() {
+            panic!("Terminal node is not allowed");
+        }
+
+        if self.is_chance_node() {
+            panic!("Chance node is not allowed");
+        }
+
+        let index = self.node_index(&self.node());
+        self.locking_strategy
+            .get(&index)
+            .map(|_| *self.locking_weight.get(&index).unwrap_or(&1.0))
+    }
+
+    /// Returns the expected length of the strategy vector at the current node,
+    /// i.e., `#(actions) * #(private hands)`.
+    ///
+    /// This method must be called after allocating memory.
+    /// Panics if the memory is not yet allocated.
+    /// Also, panics if the current node is a terminal node or a chance node.
+    #[inline]
+    pub fn expected_strategy_len(&self) -> usize {
+        if self.state < State::MemoryAllocated {
+            panic!("Memory is not allocated");
+        }
+
+        if self.is_terminal_node() {
+            panic!("Terminal node is not allowed");
+        }
+
+        if self.is_chance_node() {
+            panic!("Chance node is not allowed");
+        }
+
+        let node = self.node();
+        node.num_actions() * self.num_private_hands(self.current_player())
     }
 
     /// Returns the reference to the current node.

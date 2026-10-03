@@ -245,7 +245,8 @@ fn solve_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut strategy, locking);
+        let weight = game.locking_weight(node);
+        apply_locking_strategy(&mut strategy, locking, weight);
 
         // sum up the counterfactual values
         let mut cfv_actions = cfv_actions.lock();
@@ -262,7 +263,7 @@ fn solve_recursive<T: Game>(
                 *x += (*y as f32) * decoder;
             });
 
-            if !locking.is_empty() {
+            if !locking.is_empty() && weight >= 1.0 {
                 strategy.iter_mut().zip(locking).for_each(|(d, s)| {
                     if s.is_sign_positive() {
                         *d = 0.0;
@@ -287,7 +288,7 @@ fn solve_recursive<T: Game>(
                 sub_slice(row, result);
             });
 
-            if !locking.is_empty() {
+            if !locking.is_empty() && weight >= 1.0 {
                 cfv_actions.iter_mut().zip(locking).for_each(|(d, s)| {
                     if s.is_sign_positive() {
                         *d = 0.0;
@@ -328,7 +329,8 @@ fn solve_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut cfreach_actions, locking);
+        let weight = game.locking_weight(node);
+        apply_locking_strategy(&mut cfreach_actions, locking, weight);
 
         // update the reach probabilities
         let row_size = cfreach.len();

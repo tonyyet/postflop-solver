@@ -111,6 +111,16 @@ impl Game for PostFlopGame {
     }
 
     #[inline]
+    fn locking_weight(&self, node: &Self::Node) -> f32 {
+        if !node.is_locked {
+            1.0
+        } else {
+            let index = self.node_index(node);
+            *self.locking_weight.get(&index).unwrap_or(&1.0)
+        }
+    }
+
+    #[inline]
     fn is_compression_enabled(&self) -> bool {
         self.is_compression_enabled
     }
@@ -167,6 +177,9 @@ impl PostFlopGame {
 
         self.init_interpreter();
         self.reset_bunching_effect();
+        // A rebuilt tree invalidates any previously locked strategies (node
+        // indices are recreated from scratch), so drop the stale locking map.
+        self.locking_strategy.clear();
 
         Ok(())
     }

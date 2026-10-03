@@ -72,6 +72,16 @@ pub trait Game: Send + Sync {
         &[]
     }
 
+    /// Returns the weight of the locking strategy of the given node.
+    ///
+    /// The locked frequencies are blended with the solved ones by this weight:
+    /// `weight * locked + (1.0 - weight) * solved`. The default is `1.0`, which means a hard
+    /// lock (the locked frequencies are used as they are).
+    #[doc(hidden)]
+    fn locking_weight(&self, _node: &Self::Node) -> f32 {
+        1.0
+    }
+
     /// Returns whether the compression is enabled.
     #[doc(hidden)]
     fn is_compression_enabled(&self) -> bool {
