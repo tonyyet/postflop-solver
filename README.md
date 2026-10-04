@@ -1,3 +1,22 @@
+# postflop-solver — **node-locking fork**
+
+> [!IMPORTANT]
+> **This is a fork** of [b-inary/postflop-solver], maintained by [@tonyet] on the branch **`nodelock`** (upstream development was suspended in October 2023).
+> It adds **node locking** — hard locks, soft locks / RRN weights, per-action frequency targets, and restricted-vs-unrestricted exploitability — i.e. the engine side of the [node-locking fork of Desktop Postflop].
+> Everything below is the upstream README; the fork's changes are documented in [docs/NODELOCK.md](docs/NODELOCK.md).
+>
+> Use it (nightly Rust is required for `#![feature(allocator_api)]`):
+>
+> ```toml
+> postflop-solver = { git = "https://github.com/tonyet/postflop-solver", branch = "nodelock", features = ["custom-alloc"] }
+> ```
+>
+> This fork keeps the upstream license (see [LICENSE](LICENSE)).
+
+[b-inary/postflop-solver]: https://github.com/b-inary/postflop-solver
+[@tonyet]: https://github.com/tonyet
+[node-locking fork of Desktop Postflop]: https://github.com/tonyet/desktop-postflop/tree/nodelock
+
 # postflop-solver
 
 > [!IMPORTANT]

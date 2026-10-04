@@ -169,7 +169,7 @@ lives under `temp/perf_new` (fork) / `temp/perf_orig` (upstream)):
 
 ```bash
 # engine
-git -C C:/Users/Tony/Projects/postflop-solver checkout nodelock
+git -C <your postflop-solver clone> checkout nodelock
 cargo +nightly test --offline                      # Cargo.lock pins bincode 2.0.0-rc.3 (offline builds)
 cargo +nightly run --release --example <name>      # examples/build_tree.rs, examples/read_solution.rs
 
